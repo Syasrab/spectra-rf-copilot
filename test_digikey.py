@@ -41,12 +41,11 @@ def pick_best_result(data, part_number):
         if "EVKIT" not in p["ManufacturerProductNumber"]
         and "EVAL" not in p["ManufacturerProductNumber"].upper()
         and p["ProductStatus"]["Status"] == "Active"
+        and p["QuantityAvailable"] > 0
     ]
     if not good:
-        print(f"No active chip found for {part_number}.")
+        print(f"No active, in-stock chip found for {part_number}.")
         return None
-    # Prefer the one with the most stock, if any have stock
-    good.sort(key=lambda p: p["QuantityAvailable"], reverse=True)
     return good[0]
 
 def extract_specs(product):
@@ -84,11 +83,12 @@ def main():
     print("Step 1: getting access token...")
     token = get_token()
 
-    print("Step 2: searching for MAX2659...")
-    result = search_part(token, "MAX2659")
+    part_to_check = "SKY65404-31"
+    print(f"Step 2: searching for {part_to_check}...")
+    result = search_part(token, part_to_check)
 
     print("Step 3: picking the correct chip out of the results...")
-    best = pick_best_result(result, "MAX2659")
+    best = pick_best_result(result, part_to_check)
     if not best:
         return
 
@@ -100,11 +100,9 @@ def main():
 
     print("\nStep 4: asking Gemini a grounded question about this chip...")
     requirement = "I need an LNA that covers 1559-1610 MHz for a GNSS antenna design. Does this chip work?"
-    answer = ask_gemini_about_part(specs, "MAX2659", requirement)
+    answer = ask_gemini_about_part(specs, part_to_check, requirement)
     print("\nGemini's answer:")
     print(answer)
-
-
 
 if __name__ == "__main__":
     main()
