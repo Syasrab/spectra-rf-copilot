@@ -145,17 +145,15 @@ def main():
     print("Step 3: filtering to relevant, active, real chips...")
     good, dropped = filter_relevant_parts(result)
     print(f"Kept {len(good)} candidate(s): {[p['ManufacturerProductNumber'] for p in good]}")
-    print("\n--- Verifying real specs for each kept candidate ---")
-    for p in good:
-        print(f"\n{p['ManufacturerProductNumber']} specs:")
-        for k, v in extract_specs(p).items():
-            print(f"  {k}: {v}")
-    print("\nStep 4: asking Gemini to pick the best one...")
-    requirement = "I need an LNA for a GNSS antenna array covering 1559-1610 MHz (GPS L1, GLONASS, BeiDou), mounted outdoors, needs to be currently purchasable."
-    answer = ask_gemini_to_pick_best(good, requirement)
-    print("\nGemini's recommendation:")
-    print(answer)
 
+    requirement = "I need an LNA for a GNSS antenna array covering 1559-1610 MHz (GPS L1, GLONASS, BeiDou), mounted outdoors, needs to be currently purchasable."
+
+    print("\nStep 4: asking Gemini the SAME question 3 times to test consistency...\n")
+    for i in range(1, 4):
+        print(f"--- Run {i} ---")
+        answer = ask_gemini_to_pick_best(good, requirement)
+        print(answer)
+        print()
 
 if __name__ == "__main__":
     main()
