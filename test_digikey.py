@@ -64,11 +64,13 @@ def filter_relevant_parts(data):
 
     return good, dropped
 
+
 def extract_specs(product):
     specs = {}
     for param in product.get("Parameters", []):
         specs[param["ParameterText"]] = param["ValueText"]
     return specs
+
 
 def ask_gemini_about_part(specs, part_number, requirement):
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
@@ -95,6 +97,43 @@ Rules:
     )
     return response.text
 
+
+def ask_gemini_to_pick_best(candidates, requirement):
+    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+    candidates_text = ""
+    for p in candidates:
+        specs = extract_specs(p)
+        specs_lines = "\n".join(f"    - {k}: {v}" for k, v in specs.items())
+        candidates_text += f"""
+{p['ManufacturerProductNumber']} (${p['UnitPrice']}, {p['QuantityAvailable']} in stock):
+  Description: {p['Description'].get('DetailedDescription')}
+  Specs:
+{specs_lines}
+"""
+
+    prompt = f"""You are a strict, grounded RF component selection assistant.
+
+Here are REAL candidate LNAs, retrieved live from DigiKey's database:
+{candidates_text}
+
+USER REQUIREMENT: {requirement}
+
+Rules:
+1. Only use the specs and descriptions given above. Never recall anything about these parts from your own training knowledge.
+2. Pick exactly one part as your recommendation, or say none of them work if that's true.
+3. Explain your choice using only the specific numbers given above (frequency range, gain, noise figure, stock, price).
+4. If two candidates seem similarly good, say so and explain the tradeoff.
+5. Keep the answer under 150 words.
+"""
+
+    response = client.models.generate_content(
+        model="gemini-3.6-flash",
+        contents=prompt,
+    )
+    return response.text
+
+
 def main():
     print("Step 1: getting access token...")
     token = get_token()
@@ -103,14 +142,20 @@ def main():
     print(f"Step 2: searching DigiKey for: {search_term}...")
     result = search_part(token, search_term)
 
-    print("\nStep 3: filtering...")
+    print("Step 3: filtering to relevant, active, real chips...")
     good, dropped = filter_relevant_parts(result)
-
-    print(f"\nChecking the {len(good)} kept results' REAL descriptions:")
+    print(f"Kept {len(good)} candidate(s): {[p['ManufacturerProductNumber'] for p in good]}")
+    print("\n--- Verifying real specs for each kept candidate ---")
     for p in good:
-        print(f"\n{p['ManufacturerProductNumber']}:")
-        print(f"  Short: {p['Description'].get('ProductDescription')}")
-        print(f"  Detailed: {p['Description'].get('DetailedDescription')}")
+        print(f"\n{p['ManufacturerProductNumber']} specs:")
+        for k, v in extract_specs(p).items():
+            print(f"  {k}: {v}")
+    print("\nStep 4: asking Gemini to pick the best one...")
+    requirement = "I need an LNA for a GNSS antenna array covering 1559-1610 MHz (GPS L1, GLONASS, BeiDou), mounted outdoors, needs to be currently purchasable."
+    answer = ask_gemini_to_pick_best(good, requirement)
+    print("\nGemini's recommendation:")
+    print(answer)
+
 
 if __name__ == "__main__":
     main()
