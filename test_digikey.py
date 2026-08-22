@@ -20,7 +20,7 @@ def get_token():
     print("Got a token successfully.")
     return data["access_token"]
 
-def search_part(token, part_number):
+def search_part(token, keywords, limit=20):
     response = requests.post(
         "https://api.digikey.com/products/v4/search/keyword",
         headers={
@@ -31,22 +31,38 @@ def search_part(token, part_number):
             "X-DIGIKEY-Locale-Language": "en",
             "X-DIGIKEY-Locale-Currency": "USD",
         },
-        json={"Keywords": part_number, "Limit": 3},
+        json={"Keywords": keywords, "Limit": limit},
     )
     return response.json()
-def pick_best_result(data, part_number):
+
+# Categories we consider genuinely relevant for RF front-end parts.
+# Anything not in this list (mixers, antennas, connectors, eval boards) gets dropped.
+ALLOWED_CATEGORIES = {
+    "RF Amplifiers",
+    "RF and Wireless",
+}
+
+def filter_relevant_parts(data):
     candidates = data.get("Products", [])
-    good = [
-        p for p in candidates
-        if "EVKIT" not in p["ManufacturerProductNumber"]
-        and "EVAL" not in p["ManufacturerProductNumber"].upper()
-        and p["ProductStatus"]["Status"] == "Active"
-        and p["QuantityAvailable"] > 0
-    ]
-    if not good:
-        print(f"No active, in-stock chip found for {part_number}.")
-        return None
-    return good[0]
+    good = []
+    dropped = []
+    for p in candidates:
+        part_num = p["ManufacturerProductNumber"]
+        status = p["ProductStatus"]["Status"]
+        cat = p.get("Category", {})
+        child_names = [c["Name"] for c in cat.get("ChildCategories", [])]
+        is_eval = "EVKIT" in part_num.upper() or "EVAL" in part_num.upper() or "-EVB" in part_num.upper()
+
+        if status != "Active":
+            dropped.append((part_num, f"status is '{status}', not Active"))
+        elif is_eval:
+            dropped.append((part_num, "looks like an evaluation board, not the chip itself"))
+        elif "RF Amplifiers" not in child_names:
+            dropped.append((part_num, f"not filed under RF Amplifiers (children: {child_names})"))
+        else:
+            good.append(p)
+
+    return good, dropped
 
 def extract_specs(product):
     specs = {}
@@ -83,26 +99,18 @@ def main():
     print("Step 1: getting access token...")
     token = get_token()
 
-    part_to_check = "SKY65404-31"
-    print(f"Step 2: searching for {part_to_check}...")
-    result = search_part(token, part_to_check)
+    search_term = "GPS GNSS LNA amplifier"
+    print(f"Step 2: searching DigiKey for: {search_term}...")
+    result = search_part(token, search_term)
 
-    print("Step 3: picking the correct chip out of the results...")
-    best = pick_best_result(result, part_to_check)
-    if not best:
-        return
+    print("\nStep 3: filtering...")
+    good, dropped = filter_relevant_parts(result)
 
-    print(f"Found: {best['ManufacturerProductNumber']} (${best['UnitPrice']}, {best['QuantityAvailable']} in stock)")
-    print("\nExtracted specs:")
-    specs = extract_specs(best)
-    for key, value in specs.items():
-        print(f"  {key}: {value}")
-
-    print("\nStep 4: asking Gemini a grounded question about this chip...")
-    requirement = "I need an LNA that covers 1559-1610 MHz for a GNSS antenna design. Does this chip work?"
-    answer = ask_gemini_about_part(specs, part_to_check, requirement)
-    print("\nGemini's answer:")
-    print(answer)
+    print(f"\nChecking the {len(good)} kept results' REAL descriptions:")
+    for p in good:
+        print(f"\n{p['ManufacturerProductNumber']}:")
+        print(f"  Short: {p['Description'].get('ProductDescription')}")
+        print(f"  Detailed: {p['Description'].get('DetailedDescription')}")
 
 if __name__ == "__main__":
     main()
