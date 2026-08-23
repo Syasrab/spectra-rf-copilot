@@ -308,21 +308,49 @@ def design_array(num_jammers, center_freq_mhz, diameter_mm, dielectric_constant,
         "fits_in_diameter": geometry["fits"],
         "element_spacing_mm": round(geometry["element_spacing_mm"], 1) if geometry["element_spacing_mm"] else None,
     }
+def full_design(token, num_jammers, center_freq_mhz, band_mhz, diameter_mm, dielectric_constant, substrate_height_mm):
+    """
+    The combined pipeline: deterministic array math + grounded component
+    retrieval, in one call.
+    """
+    print(f"\n{'='*60}")
+    print("ARRAY DESIGN (deterministic, no AI)")
+    print(f"{'='*60}")
+    array = design_array(num_jammers, center_freq_mhz, diameter_mm, dielectric_constant, substrate_height_mm)
+    for key, value in array.items():
+        print(f"  {key}: {value}")
+
+    fmin, fmax = band_mhz
+    requirement = (
+        f"I need an LNA for a {array['n_elements']}-element GNSS antenna array "
+        f"covering {fmin}-{fmax} MHz, mounted outdoors, needs to be currently purchasable."
+    )
+
+    recommendation = find_and_recommend(
+        token,
+        search_term="GPS GNSS LNA amplifier",
+        requirement=requirement,
+        required_child_categories={"RF Amplifiers"},
+    )
+
+    return {"array_design": array, "lna_recommendation": recommendation}
 # =========================================================
 # MAIN
 # =========================================================
 
 def main():
-    result = design_array(
+    print("Getting DigiKey access token...")
+    token = get_token()
+
+    full_design(
+        token,
         num_jammers=4,
         center_freq_mhz=1584.5,
+        band_mhz=(1559, 1610),
         diameter_mm=125,
         dielectric_constant=9.8,
         substrate_height_mm=3.175,
     )
-    print("Array design result:")
-    for key, value in result.items():
-        print(f"  {key}: {value}")
 
 if __name__ == "__main__":
     main()
