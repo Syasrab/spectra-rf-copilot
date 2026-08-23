@@ -248,23 +248,81 @@ def find_and_recommend(token, search_term, requirement, required_child_categorie
     print(recommendation)
     return recommendation
 
+# =========================================================
+# DETERMINISTIC RF CALCULATIONS
+# Pure math, no AI involved. This is intentional: array element count and
+# patch dimensions are governed by fixed physics/formulas, not judgment
+# calls, so they should never be left to an LLM to "decide."
+# =========================================================
 
+import math
+
+def min_elements_for_jammers(num_jammers):
+    """N-1 rule: an N-element adaptive array can null at most N-1 interferers."""
+    return num_jammers + 1
+
+
+def patch_antenna_size(freq_mhz, dielectric_constant, substrate_height_mm):
+    """
+    Balanis microstrip patch antenna sizing formula.
+    Returns patch width and length in mm.
+    """
+    c = 299792458  # speed of light, m/s
+    f = freq_mhz * 1e6
+    h = substrate_height_mm / 1000
+    er = dielectric_constant
+
+    W = c / (2 * f) * math.sqrt(2 / (er + 1))
+    ereff = (er + 1) / 2 + (er - 1) / 2 * (1 + 12 * h / W) ** -0.5
+    dL = 0.412 * h * (ereff + 0.3) * (W / h + 0.264) / ((ereff - 0.258) * (W / h + 0.8))
+    L = c / (2 * f * math.sqrt(ereff)) - 2 * dL
+
+    return {"width_mm": W * 1000, "length_mm": L * 1000, "effective_dielectric": ereff}
+
+
+def array_ring_geometry(num_elements, diameter_mm, patch_size_mm):
+    """
+    Given N elements (1 center + (N-1) ring) and a diameter budget,
+    compute the ring radius and whether it physically fits.
+    """
+    n_ring = max(num_elements - 1, 1)
+    ring_radius = (diameter_mm / 2) - (patch_size_mm / 2) - 3  # 3mm margin
+    fits = ring_radius > 0
+    spacing_mm = None
+    if fits and n_ring > 1:
+        spacing_mm = 2 * ring_radius * math.sin(math.pi / n_ring)
+    return {"n_ring": n_ring, "ring_radius_mm": ring_radius, "fits": fits, "element_spacing_mm": spacing_mm}
+
+
+def design_array(num_jammers, center_freq_mhz, diameter_mm, dielectric_constant, substrate_height_mm):
+    """Run all three calculations together and return one clean result."""
+    n_elements = min_elements_for_jammers(num_jammers)
+    patch = patch_antenna_size(center_freq_mhz, dielectric_constant, substrate_height_mm)
+    geometry = array_ring_geometry(n_elements, diameter_mm, max(patch["width_mm"], patch["length_mm"]))
+
+    return {
+        "n_elements": n_elements,
+        "patch_width_mm": round(patch["width_mm"], 1),
+        "patch_length_mm": round(patch["length_mm"], 1),
+        "ring_radius_mm": round(geometry["ring_radius_mm"], 1) if geometry["fits"] else None,
+        "fits_in_diameter": geometry["fits"],
+        "element_spacing_mm": round(geometry["element_spacing_mm"], 1) if geometry["element_spacing_mm"] else None,
+    }
 # =========================================================
 # MAIN
 # =========================================================
 
 def main():
-    print("Getting DigiKey access token...")
-    token = get_token()
-
-    # --- Proven working: LNA search ---
-    find_and_recommend(
-        token,
-        search_term="GPS GNSS LNA amplifier",
-        requirement="I need an LNA for a GNSS antenna array covering 1559-1610 MHz (GPS L1, GLONASS, BeiDou), mounted outdoors, needs to be currently purchasable.",
-        required_child_categories={"RF Amplifiers"},
-        show_dropped=True,
+    result = design_array(
+        num_jammers=4,
+        center_freq_mhz=1584.5,
+        diameter_mm=125,
+        dielectric_constant=9.8,
+        substrate_height_mm=3.175,
     )
+    print("Array design result:")
+    for key, value in result.items():
+        print(f"  {key}: {value}")
 
 if __name__ == "__main__":
     main()
