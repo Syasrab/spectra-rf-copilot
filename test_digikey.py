@@ -1,8 +1,10 @@
 import os
 import re
+import io
 import math
 import requests
 from google import genai
+from pypdf import PdfReader
 
 # =========================================================
 # AUTHENTICATION
@@ -152,6 +154,47 @@ def diagnostic_search(token, search_term, limit=50):
 
 
 # =========================================================
+# LIVE DATASHEET RAG
+# DigiKey's structured parametric fields don't capture everything a real
+# datasheet says (e.g. full constellation support, exact frequency range).
+# DigiKey DOES give us a real link to the manufacturer's actual PDF for
+# every part (DatasheetUrl). We fetch and extract text from it live, then
+# hand that real text to Gemini alongside the structured specs. This is
+# genuine retrieval-augmented generation: the "knowledge" is fetched fresh
+# from a real source each time, not hardcoded or memorized.
+# =========================================================
+
+_datasheet_cache = {}
+
+def fetch_datasheet_text(url, max_pages=2):
+    """
+    Download a real manufacturer PDF datasheet and extract text from its
+    first pages, where General Description / Features sections usually
+    live. Cached in-memory so we don't re-download the same PDF twice
+    in one run.
+    """
+    if url in _datasheet_cache:
+        return _datasheet_cache[url]
+
+    # DigiKey sometimes gives protocol-relative URLs (starting with //),
+    # which browsers handle automatically but requests does not.
+    if url.startswith("//"):
+        url = "https:" + url
+
+    try:
+        response = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        reader = PdfReader(io.BytesIO(response.content))
+        text = ""
+        for page in reader.pages[:max_pages]:
+            text += page.extract_text() + "\n"
+        text = text[:3000]
+        _datasheet_cache[url] = text
+        return text
+    except Exception as e:
+        return f"(Could not fetch or read datasheet PDF: {e})"
+
+
+# =========================================================
 # GEMINI - GROUNDED REASONING
 # Strict rule enforced in every prompt: only use the retrieved data given,
 # never recall specs from training knowledge. This is what fixed the
@@ -180,35 +223,51 @@ Rules:
     return response.text
 
 
-def ask_gemini_to_pick_best(candidates, requirement):
-    """Compare multiple real candidates and recommend the best one."""
+def ask_gemini_to_pick_best(candidates, requirement, fetch_datasheets=True):
+    """Compare multiple real candidates and recommend the best one.
+    When fetch_datasheets=True, also pulls live text from each candidate's
+    real manufacturer PDF datasheet as additional grounding."""
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
     candidates_text = ""
     for p in candidates:
         specs = extract_specs(p)
         specs_lines = "\n".join(f"    - {k}: {v}" for k, v in specs.items())
+        part_num = p['ManufacturerProductNumber']
+
+        datasheet_excerpt = ""
+        datasheet_url = p.get('DatasheetUrl')
+        if fetch_datasheets and datasheet_url:
+            print(f"  Fetching real datasheet for {part_num}...")
+            text = fetch_datasheet_text(datasheet_url)
+            datasheet_excerpt = f"""
+  REAL DATASHEET EXCERPT (fetched live from {datasheet_url}):
+    {text}
+"""
+
         candidates_text += f"""
-{p['ManufacturerProductNumber']} (${p.get('UnitPrice', 'unknown')}, {p.get('QuantityAvailable', 'unknown')} in stock):
+{part_num} (${p.get('UnitPrice', 'unknown')}, {p.get('QuantityAvailable', 'unknown')} in stock):
   Description: {p['Description'].get('DetailedDescription')}
-  Specs:
+  DigiKey Specs:
 {specs_lines}
+{datasheet_excerpt}
 """
 
     prompt = f"""You are a strict, grounded RF component selection assistant.
 
-Here are REAL candidate parts, retrieved live from DigiKey's database:
+Here are REAL candidate parts, retrieved live from DigiKey's database, each with structured specs and (where available) an excerpt fetched live from the real manufacturer PDF datasheet:
 {candidates_text}
 
 USER REQUIREMENT: {requirement}
 
 Rules:
-1. Only use the specs and descriptions given above. Never recall anything about these parts from your own training knowledge.
-2. Pick exactly one part as your recommendation, or say none of them work if that's true.
-3. State your final pick clearly on the very first line, in the format: "RECOMMENDATION: <exact part number>"
-4. Then explain your choice using only the specific numbers given above (frequency range, gain, noise figure, stock, price).
-5. If two candidates seem similarly good, say so and explain the tradeoff.
-6. Keep the answer under 150 words.
+1. Only use the specs and datasheet excerpts given above. Never recall anything about these parts from your own training knowledge.
+2. Both the DigiKey specs and the datasheet excerpt are real, verified sources. If the datasheet excerpt confirms something the DigiKey specs don't mention, you may use it.
+3. Pick exactly one part as your recommendation, or say none of them work if that's true.
+4. State your final pick clearly on the very first line, in the format: "RECOMMENDATION: <exact part number>"
+5. Then explain your choice using only the specific facts given above (frequency, gain, noise figure, constellations supported, stock, price).
+6. If two candidates seem similarly good, say so and explain the tradeoff.
+7. Keep the answer under 150 words.
 """
     response = client.models.generate_content(model="gemini-3.6-flash", contents=prompt)
     return response.text
@@ -342,7 +401,7 @@ def power_budget(n_elements, lna_specs, digital_backend_watts=5.0):
 # FULL PIPELINE
 # =========================================================
 
-def find_and_recommend(token, search_term, requirement, required_child_categories=None, show_dropped=False):
+def find_and_recommend(token, search_term, requirement, required_child_categories=None, show_dropped=False, fetch_datasheets=True):
     """Reusable single-category search + filter + grounded recommendation."""
     print(f"\n{'='*60}")
     print(f"SEARCHING: {search_term}")
@@ -368,8 +427,8 @@ def find_and_recommend(token, search_term, requirement, required_child_categorie
         print("or run diagnostic_search() to see what categories/descriptions actually exist.")
         return None, None
 
-    print(f"\nAsking Gemini to recommend the best of {len(good)} candidate(s)...")
-    recommendation_text = ask_gemini_to_pick_best(good, requirement)
+    print(f"\nAsking Gemini to recommend the best of {len(good)} candidate(s) (fetching real datasheets)...")
+    recommendation_text = ask_gemini_to_pick_best(good, requirement, fetch_datasheets=fetch_datasheets)
     print(f"\n--- Gemini's recommendation ---")
     print(recommendation_text)
 
@@ -398,7 +457,6 @@ def complete_solution(token, num_jammers, band_mhz, diameter_mm, dielectric_cons
     2. How to power it up
     3. What frequencies to operate at
     4. Which chips and components to buy (with reasons)
-    Plus a system block diagram (architecture list, diagram added separately).
     """
     fmin, fmax = band_mhz
     freq_plan = frequency_plan(fmin, fmax)
@@ -451,19 +509,15 @@ def main():
     print("Getting DigiKey access token...")
     token = get_token()
 
-    result = complete_solution(
+    requirement = "I need a GNSS RF front-end/receiver chip covering GPS L1, GLONASS, and BeiDou around 1559-1610 MHz, currently purchasable."
+
+    recommendation_text, chosen_part = find_and_recommend(
         token,
-        num_jammers=4,
-        band_mhz=(1559, 1610),
-        diameter_mm=125,
-        dielectric_constant=9.8,
-        substrate_height_mm=3.175,
+        search_term="MAX2769",
+        requirement=requirement,
+        required_child_categories={"RF Receivers"},
+        show_dropped=True,
     )
-
-    print("\n\n=== FULL STRUCTURED RESULT ===")
-    import json
-    print(json.dumps(result, indent=2, default=str))
-
 
 if __name__ == "__main__":
     main()
