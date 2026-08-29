@@ -504,20 +504,17 @@ def complete_solution(token, num_jammers, band_mhz, diameter_mm, dielectric_cons
 # =========================================================
 # MAIN
 # =========================================================
-
 def main():
     print("Getting DigiKey access token...")
     token = get_token()
 
-    requirement = "I need a GNSS RF front-end/receiver chip covering GPS L1, GLONASS, and BeiDou around 1559-1610 MHz, currently purchasable."
-
-    recommendation_text, chosen_part = find_and_recommend(
-        token,
-        search_term="MAX2769",
-        requirement=requirement,
-        required_child_categories={"RF Receivers"},
-        show_dropped=True,
-    )
+    # We already know this URL from earlier
+    max2769b_datasheet = fetch_datasheet_text("https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/1075/MAX2769B_PB.pdf", max_pages=3)
+    print("Searching MAX2769B datasheet text for reference clock/TCXO mentions...")
+    import re
+    for line in max2769b_datasheet.split("\n"):
+        if re.search(r"(reference|TCXO|MHz|clock)", line, re.IGNORECASE):
+            print(" ", line.strip())
 
 if __name__ == "__main__":
     main()
