@@ -129,9 +129,7 @@ def extract_specs(product):
 # =========================================================
 # DIAGNOSTIC TOOL
 # Use this FIRST whenever searching a new part category, to see real
-# category names and descriptions before writing filter rules. Guessing
-# category names (as we initially did with "RF Amplifiers" as the only
-# allowed top-level name) leads to filters that silently do nothing.
+# category names and descriptions before writing filter rules.
 # =========================================================
 
 def diagnostic_search(token, search_term, limit=50):
@@ -191,7 +189,7 @@ def ask_gemini_to_pick_best(candidates, requirement):
         specs = extract_specs(p)
         specs_lines = "\n".join(f"    - {k}: {v}" for k, v in specs.items())
         candidates_text += f"""
-{p['ManufacturerProductNumber']} (${p['UnitPrice']}, {p['QuantityAvailable']} in stock):
+{p['ManufacturerProductNumber']} (${p.get('UnitPrice', 'unknown')}, {p.get('QuantityAvailable', 'unknown')} in stock):
   Description: {p['Description'].get('DetailedDescription')}
   Specs:
 {specs_lines}
@@ -220,9 +218,6 @@ def identify_recommended_part(recommendation_text, candidates):
     """
     Figure out which specific candidate Gemini actually recommended, instead
     of assuming it's whichever one the search API happened to return first.
-    Looks for the explicit "RECOMMENDATION: <part>" line first (most
-    reliable, since we now ask Gemini to always include it), then falls
-    back to checking which part number appears earliest in the text.
     """
     match = re.search(r"RECOMMENDATION:\s*\**\s*([A-Za-z0-9\-/+]+)", recommendation_text)
     if match:
@@ -231,7 +226,6 @@ def identify_recommended_part(recommendation_text, candidates):
             if p["ManufacturerProductNumber"] == recommended_num:
                 return p
 
-    # Fallback: whichever candidate's part number appears earliest in the text
     best_p, best_pos = None, len(recommendation_text) + 1
     for p in candidates:
         pos = recommendation_text.find(p["ManufacturerProductNumber"])
@@ -383,29 +377,37 @@ def find_and_recommend(token, search_term, requirement, required_child_categorie
     return recommendation_text, chosen_part
 
 
-def full_design(token, num_jammers, band_mhz, diameter_mm, dielectric_constant, substrate_height_mm):
+# =========================================================
+# COMPLETE SOLUTION - matches Dr. Wasif's exact 4 requirements
+# =========================================================
+
+SYSTEM_ARCHITECTURE = [
+    {"stage": "Antenna Array", "verified": True, "note": "Dimensions calculated below"},
+    {"stage": "LNA", "verified": True, "note": "Live, DigiKey-verified recommendation below"},
+    {"stage": "Bandpass Filter", "verified": False, "note": "Architecture reference only, not yet DigiKey-verified"},
+    {"stage": "RF Transceiver / GNSS Front-End", "verified": False, "note": "Architecture reference only, not yet DigiKey-verified"},
+    {"stage": "Digital Beamforming Processor (FPGA)", "verified": False, "note": "Architecture reference only, not yet DigiKey-verified"},
+    {"stage": "GNSS Receiver Output", "verified": False, "note": "Final position/timing output stage"},
+]
+
+
+def complete_solution(token, num_jammers, band_mhz, diameter_mm, dielectric_constant, substrate_height_mm):
+    """
+    Answers Dr. Wasif's exact four requirements:
+    1. Antenna dimensions
+    2. How to power it up
+    3. What frequencies to operate at
+    4. Which chips and components to buy (with reasons)
+    Plus a system block diagram (architecture list, diagram added separately).
+    """
     fmin, fmax = band_mhz
     freq_plan = frequency_plan(fmin, fmax)
-    center_freq_mhz = freq_plan["center_freq_mhz"]
-
-    print(f"\n{'='*60}")
-    print("FREQUENCY PLAN (deterministic)")
-    print(f"{'='*60}")
-    for key, value in freq_plan.items():
-        print(f"  {key}: {value}")
-
-    print(f"\n{'='*60}")
-    print("ARRAY DESIGN (deterministic)")
-    print(f"{'='*60}")
-    array = design_array(num_jammers, center_freq_mhz, diameter_mm, dielectric_constant, substrate_height_mm)
-    for key, value in array.items():
-        print(f"  {key}: {value}")
+    array = design_array(num_jammers, freq_plan["center_freq_mhz"], diameter_mm, dielectric_constant, substrate_height_mm)
 
     requirement = (
         f"I need an LNA for a {array['n_elements']}-element GNSS antenna array "
         f"covering {fmin}-{fmax} MHz, mounted outdoors, needs to be currently purchasable."
     )
-
     recommendation_text, chosen_part = find_and_recommend(
         token,
         search_term="GPS GNSS LNA amplifier",
@@ -413,24 +415,31 @@ def full_design(token, num_jammers, band_mhz, diameter_mm, dielectric_constant, 
         required_child_categories={"RF Amplifiers"},
     )
 
-    power = None
-    if chosen_part:
-        print(f"\n(Confirmed: using {chosen_part['ManufacturerProductNumber']}, the part Gemini actually recommended, for the power budget)")
-        print(f"{'='*60}")
-        print("POWER BUDGET (deterministic, using real retrieved specs)")
-        print(f"{'='*60}")
-        power = power_budget(array["n_elements"], extract_specs(chosen_part))
-        for key, value in power.items():
-            print(f"  {key}: {value}")
-    else:
-        print("\nCould not identify which specific part was recommended, skipping power budget.")
+    power = power_budget(array["n_elements"], extract_specs(chosen_part)) if chosen_part else None
 
     return {
-        "frequency_plan": freq_plan,
-        "array_design": array,
-        "lna_recommendation_text": recommendation_text,
-        "chosen_part_number": chosen_part["ManufacturerProductNumber"] if chosen_part else None,
-        "power_budget": power,
+        "1_antenna_dimensions": {
+            "n_elements": array["n_elements"],
+            "topology": f"1 center + {array['n_elements']-1} ring",
+            "patch_width_mm": array["patch_width_mm"],
+            "patch_length_mm": array["patch_length_mm"],
+            "ring_radius_mm": array["ring_radius_mm"],
+            "reason": (
+                f"N-1 rule: {num_jammers} jammers require at least {array['n_elements']} elements. "
+                f"Patch size calculated via the standard Balanis microstrip formula at "
+                f"{freq_plan['center_freq_mhz']} MHz on a substrate with dielectric constant {dielectric_constant}."
+            ),
+        },
+        "2_powering": power if power else {"known": False, "note": "No chip was recommended, cannot calculate power."},
+        "3_frequencies": {
+            **freq_plan,
+            "reason": f"Band chosen to cover the required GNSS constellations within {fmin}-{fmax} MHz.",
+        },
+        "4_chips_and_components": {
+            "recommendation": recommendation_text,
+            "chosen_part": chosen_part["ManufacturerProductNumber"] if chosen_part else None,
+        },
+        "system_architecture": SYSTEM_ARCHITECTURE,
     }
 
 
@@ -442,7 +451,7 @@ def main():
     print("Getting DigiKey access token...")
     token = get_token()
 
-    full_design(
+    result = complete_solution(
         token,
         num_jammers=4,
         band_mhz=(1559, 1610),
@@ -450,6 +459,10 @@ def main():
         dielectric_constant=9.8,
         substrate_height_mm=3.175,
     )
+
+    print("\n\n=== FULL STRUCTURED RESULT ===")
+    import json
+    print(json.dumps(result, indent=2, default=str))
 
 
 if __name__ == "__main__":
