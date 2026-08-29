@@ -1,7 +1,7 @@
 {
     "$schema": "https://schemas.kicad.org/erc.v1.json",
     "coordinate_units": "mm",
-    "date": "2026-08-28T18:13:56",
+    "date": "2026-08-29T12:27:03",
     "ignored_checks": [
         {
             "description": "Global label only appears once in the schematic",
@@ -29,7 +29,7 @@
     "sheets": [
         {
             "path": "/",
-            "uuid_path": "/6326bdc1-5655-4377-bdf2-685fc4073949",
+            "uuid_path": "/ed47f0ed-67cd-45ed-9254-09d9fa81e65c",
             "violations": [
                 {
                     "description": "Label connected to only one pin",
@@ -37,10 +37,10 @@
                         {
                             "description": "Label 'ANT_IN'",
                             "pos": {
-                                "x": 0.2032,
-                                "y": 0.4572
+                                "x": 0.2413,
+                                "y": 0.4953
                             },
-                            "uuid": "72f1ffdb-19b1-4783-848c-8f292212449f"
+                            "uuid": "14858887-c9f6-4f8c-8dd8-7ffaac7fdaba"
                         }
                     ],
                     "severity": "warning",
@@ -55,7 +55,7 @@
                                 "x": 0.7747,
                                 "y": 0.4953
                             },
-                            "uuid": "60ed245a-dad4-454a-b6d3-317aaca9f010"
+                            "uuid": "3fe4b6ca-06da-4286-a4d5-387cc3f4da09"
                         }
                     ],
                     "severity": "warning",
