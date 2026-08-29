@@ -508,13 +508,19 @@ def main():
     print("Getting DigiKey access token...")
     token = get_token()
 
-    # We already know this URL from earlier
-    max2769b_datasheet = fetch_datasheet_text("https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/1075/MAX2769B_PB.pdf", max_pages=3)
-    print("Searching MAX2769B datasheet text for reference clock/TCXO mentions...")
-    import re
-    for line in max2769b_datasheet.split("\n"):
-        if re.search(r"(reference|TCXO|MHz|clock)", line, re.IGNORECASE):
-            print(" ", line.strip())
+    requirement = (
+        "I need a low-noise linear voltage regulator (LDO) providing a clean 3.3V rail "
+        "for RF components (an LNA and a GNSS receiver IC), low output noise is important "
+        "since this feeds sensitive RF circuitry. Needs to be currently purchasable, active status."
+    )
+
+    recommendation_text, chosen_part = find_and_recommend(
+        token,
+        search_term="LDO regulator 3.3V low noise",
+        requirement=requirement,
+        required_child_categories={"Power Management (PMIC)"},
+        show_dropped=True,
+    )
 
 if __name__ == "__main__":
     main()
