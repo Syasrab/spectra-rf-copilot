@@ -2,11 +2,14 @@ import os
 import re
 import io
 import math
+import time
 import requests
 from google import genai
 from pypdf import PdfReader
 
-import time
+# =========================================================
+# AUTHENTICATION
+# =========================================================
 
 def get_token(max_retries=3, retry_delay=5):
     """Get a temporary access token from DigiKey using client credentials.
@@ -153,8 +156,6 @@ def extract_specs(product):
 
 # =========================================================
 # DIAGNOSTIC TOOL
-# Use this FIRST whenever searching a new part category, to see real
-# category names and descriptions before writing filter rules.
 # =========================================================
 
 def diagnostic_search(token, search_term, limit=50):
@@ -179,12 +180,15 @@ def diagnostic_search(token, search_term, limit=50):
 # =========================================================
 # LIVE DATASHEET RAG
 # DigiKey's structured parametric fields don't capture everything a real
-# datasheet says (e.g. full constellation support, exact frequency range).
-# DigiKey DOES give us a real link to the manufacturer's actual PDF for
-# every part (DatasheetUrl). We fetch and extract text from it live, then
-# hand that real text to Gemini alongside the structured specs. This is
-# genuine retrieval-augmented generation: the "knowledge" is fetched fresh
-# from a real source each time, not hardcoded or memorized.
+# datasheet says. DigiKey gives us a real link to the manufacturer's PDF
+# for every part (DatasheetUrl). We fetch and extract text from it live.
+# Some manufacturers (e.g. AMD/Xilinx) use JavaScript documentation portals
+# instead of direct PDFs - we detect this and report it honestly rather
+# than crash or silently fail.
+#
+# TODO (next session): Add Mouser API as a fallback datasheet source.
+# When DigiKey's DatasheetUrl fails or returns non-PDF content, search
+# Mouser for the same part number and try its datasheet link instead.
 # =========================================================
 
 _datasheet_cache = {}
@@ -192,20 +196,29 @@ _datasheet_cache = {}
 def fetch_datasheet_text(url, max_pages=2):
     """
     Download a real manufacturer PDF datasheet and extract text from its
-    first pages, where General Description / Features sections usually
-    live. Cached in-memory so we don't re-download the same PDF twice
-    in one run.
+    first pages. Cached in-memory so we don't re-download the same PDF
+    twice in one run.
     """
     if url in _datasheet_cache:
         return _datasheet_cache[url]
 
-    # DigiKey sometimes gives protocol-relative URLs (starting with //),
-    # which browsers handle automatically but requests does not.
     if url.startswith("//"):
         url = "https:" + url
 
     try:
         response = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        content_type = response.headers.get("Content-Type", "")
+
+        if "application/pdf" not in content_type and not response.content.startswith(b"%PDF"):
+            result = (
+                f"(This manufacturer's datasheet link is not a direct PDF, it is a "
+                f"JavaScript-rendered documentation page at {url}. This tool cannot "
+                f"read JavaScript-rendered pages, so no datasheet text is available "
+                f"for this part beyond DigiKey's own structured specs.)"
+            )
+            _datasheet_cache[url] = result
+            return result
+
         reader = PdfReader(io.BytesIO(response.content))
         text = ""
         for page in reader.pages[:max_pages]:
@@ -219,9 +232,6 @@ def fetch_datasheet_text(url, max_pages=2):
 
 # =========================================================
 # GEMINI - GROUNDED REASONING
-# Strict rule enforced in every prompt: only use the retrieved data given,
-# never recall specs from training knowledge. This is what fixed the
-# hallucination failures found in the original 5-model comparison.
 # =========================================================
 
 def ask_gemini_about_part(specs, part_number, requirement):
@@ -247,9 +257,7 @@ Rules:
 
 
 def ask_gemini_to_pick_best(candidates, requirement, fetch_datasheets=True):
-    """Compare multiple real candidates and recommend the best one.
-    When fetch_datasheets=True, also pulls live text from each candidate's
-    real manufacturer PDF datasheet as additional grounding."""
+    """Compare multiple real candidates and recommend the best one."""
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
     candidates_text = ""
@@ -297,10 +305,7 @@ Rules:
 
 
 def identify_recommended_part(recommendation_text, candidates):
-    """
-    Figure out which specific candidate Gemini actually recommended, instead
-    of assuming it's whichever one the search API happened to return first.
-    """
+    """Figure out which specific candidate Gemini actually recommended."""
     match = re.search(r"RECOMMENDATION:\s*\**\s*([A-Za-z0-9\-/+]+)", recommendation_text)
     if match:
         recommended_num = match.group(1).strip("*").strip()
@@ -318,9 +323,6 @@ def identify_recommended_part(recommendation_text, candidates):
 
 # =========================================================
 # DETERMINISTIC RF CALCULATIONS
-# Pure math, no AI involved. Array element count and patch dimensions are
-# governed by fixed physics/formulas, not judgment calls, so they should
-# never be left to an LLM to "decide."
 # =========================================================
 
 def min_elements_for_jammers(num_jammers):
@@ -347,7 +349,7 @@ def array_ring_geometry(num_elements, diameter_mm, patch_size_mm):
     """Given N elements (1 center + (N-1) ring) and a diameter budget,
     compute the ring radius and whether it physically fits."""
     n_ring = max(num_elements - 1, 1)
-    ring_radius = (diameter_mm / 2) - (patch_size_mm / 2) - 3  # 3mm margin
+    ring_radius = (diameter_mm / 2) - (patch_size_mm / 2) - 3
     fits = ring_radius > 0
     spacing_mm = None
     if fits and n_ring > 1:
@@ -391,10 +393,7 @@ def parse_current_ma(specs):
 
 
 def power_budget(n_elements, lna_specs, digital_backend_watts=5.0):
-    """
-    Calculate a real power budget using the ACTUAL retrieved LNA current
-    draw, not an assumption. Falls back honestly if data isn't available.
-    """
+    """Calculate a real power budget using the ACTUAL retrieved LNA current draw."""
     lna_current_ma = parse_current_ma(lna_specs)
     voltage_str = lna_specs.get("Voltage - Supply", "unknown")
 
@@ -405,7 +404,7 @@ def power_budget(n_elements, lna_specs, digital_backend_watts=5.0):
         }
 
     total_lna_current_ma = lna_current_ma * n_elements
-    total_lna_watts = (total_lna_current_ma / 1000) * 3.3  # assume 3.3V rail for the LNA stage
+    total_lna_watts = (total_lna_current_ma / 1000) * 3.3
     total_watts = total_lna_watts + digital_backend_watts
 
     return {
@@ -446,8 +445,7 @@ def find_and_recommend(token, search_term, requirement, required_child_categorie
             print(f"  {part_num} -- {reason}")
 
     if not good:
-        print("\nNo usable candidates survived filtering. Try a different search term,")
-        print("or run diagnostic_search() to see what categories/descriptions actually exist.")
+        print("\nNo usable candidates survived filtering.")
         return None, None
 
     print(f"\nAsking Gemini to recommend the best of {len(good)} candidate(s) (fetching real datasheets)...")
@@ -459,91 +457,180 @@ def find_and_recommend(token, search_term, requirement, required_child_categorie
     return recommendation_text, chosen_part
 
 
+def safe_find_and_recommend(token, **kwargs):
+    """Wraps find_and_recommend so a failure in one category (e.g. a
+    DigiKey timeout) doesn't crash the entire complete_solution() call.
+    Returns (error message, None) on failure, which downstream code
+    already handles gracefully as 'not confirmed'."""
+    try:
+        return find_and_recommend(token, **kwargs)
+    except Exception as e:
+        print(f"  WARNING: This category failed and will be marked unconfirmed: {e}")
+        return f"(This category could not be searched due to a connection error: {e})", None
+
+
 # =========================================================
-# COMPLETE SOLUTION - matches Dr. Wasif's exact 4 requirements
+# COMPLETE SOLUTION - matches Dr. Wasif's exact 4 requirements,
+# covering all 6 verified component categories.
 # =========================================================
 
-SYSTEM_ARCHITECTURE = [
-    {"stage": "Antenna Array", "verified": True, "note": "Dimensions calculated below"},
-    {"stage": "LNA", "verified": True, "note": "Live, DigiKey-verified recommendation below"},
-    {"stage": "Bandpass Filter", "verified": False, "note": "Architecture reference only, not yet DigiKey-verified"},
-    {"stage": "RF Transceiver / GNSS Front-End", "verified": False, "note": "Architecture reference only, not yet DigiKey-verified"},
-    {"stage": "Digital Beamforming Processor (FPGA)", "verified": False, "note": "Architecture reference only, not yet DigiKey-verified"},
-    {"stage": "GNSS Receiver Output", "verified": False, "note": "Final position/timing output stage"},
+SYSTEM_ARCHITECTURE_TEMPLATE = [
+    "Antenna Array",
+    "LNA",
+    "Bandpass Filter",
+    "GNSS Front-End Receiver",
+    "TCXO Reference Clock",
+    "Digital Beamforming Processor (FPGA)",
+    "Power Regulator (LDO)",
 ]
 
 
 def complete_solution(token, num_jammers, band_mhz, diameter_mm, dielectric_constant, substrate_height_mm):
     """
-    Answers Dr. Wasif's exact four requirements:
-    1. Antenna dimensions
-    2. How to power it up
-    3. What frequencies to operate at
-    4. Which chips and components to buy (with reasons)
+    Answers Dr. Wasif's 4 requirements using all 6 verified component
+    categories: antenna dimensions, powering, frequencies, and chips
+    (LNA, filter, front-end, TCXO, FPGA, power regulator).
     """
     fmin, fmax = band_mhz
     freq_plan = frequency_plan(fmin, fmax)
     array = design_array(num_jammers, freq_plan["center_freq_mhz"], diameter_mm, dielectric_constant, substrate_height_mm)
+    n = array["n_elements"]
 
-    requirement = (
-        f"I need an LNA for a {array['n_elements']}-element GNSS antenna array "
-        f"covering {fmin}-{fmax} MHz, mounted outdoors, needs to be currently purchasable."
-    )
-    recommendation_text, chosen_part = find_and_recommend(
-        token,
-        search_term="GPS GNSS LNA amplifier",
-        requirement=requirement,
+    print("\n### 1/6: Finding LNA ###")
+    lna_text, lna_part = safe_find_and_recommend(
+        token, search_term="GPS GNSS LNA amplifier",
+        requirement=f"I need an LNA for a {n}-element GNSS antenna array covering {fmin}-{fmax} MHz, mounted outdoors, currently purchasable.",
         required_child_categories={"RF Amplifiers"},
     )
 
-    power = power_budget(array["n_elements"], extract_specs(chosen_part)) if chosen_part else None
+    print("\n### 2/6: Finding bandpass filter ###")
+    filter_text, filter_part = safe_find_and_recommend(
+        token, search_term="SAW filter GNSS",
+        requirement=f"I need a SAW bandpass filter covering GPS L1, GLONASS, and BeiDou around {fmin}-{fmax} MHz, to reject out-of-band interference before the LNA/receiver stage. Currently purchasable, active status.",
+        required_child_categories={"SAW Filters"},
+    )
+
+    print("\n### 3/6: Finding GNSS front-end chip ###")
+    frontend_text, frontend_part = safe_find_and_recommend(
+        token, search_term="MAX2769",
+        requirement=f"I need a GNSS RF front-end/receiver chip covering GPS L1, GLONASS, and BeiDou around {fmin}-{fmax} MHz, currently purchasable.",
+        required_child_categories={"RF Receivers"},
+    )
+
+    print("\n### 4/6: Finding TCXO reference clock ###")
+    tcxo_text, tcxo_part = safe_find_and_recommend(
+        token, search_term="TCXO oscillator GPS",
+        requirement=f"I need a TCXO reference oscillator for a {n}-channel phase-coherent array (all channels must share this same clock). Currently purchasable, active status, a real oscillator component (not an evaluation board or GPSDO module).",
+        required_child_categories={"Oscillators"},
+    )
+
+    print("\n### 5/6: Finding FPGA/digital processor ###")
+    fpga_text, fpga_part = safe_find_and_recommend(
+        token, search_term="XC7Z020",
+        requirement=f"I need an FPGA/SoC to run real-time digital beamforming (adaptive nulling algorithms like MVDR or power-inversion) for a {n}-channel phase-coherent GNSS antenna array. Currently purchasable, active status, a bare chip (not a development board or embedded module).",
+        required_child_categories={"Embedded"},
+    )
+
+    print("\n### 6/6: Finding power regulator ###")
+    power_reg_text, power_reg_part = safe_find_and_recommend(
+        token, search_term="LDO regulator 3.3V low noise",
+        requirement="I need a low-noise linear voltage regulator (LDO) providing a clean 3.3V rail for RF components (an LNA and a GNSS receiver IC), low output noise is important since this feeds sensitive RF circuitry. Currently purchasable, active status.",
+        required_child_categories={"Power Management (PMIC)"},
+    )
+
+    power = power_budget(n, extract_specs(lna_part)) if lna_part else None
+
+    components = {
+        "lna": {"recommendation": lna_text, "chosen_part": lna_part["ManufacturerProductNumber"] if lna_part else None},
+        "bandpass_filter": {"recommendation": filter_text, "chosen_part": filter_part["ManufacturerProductNumber"] if filter_part else None},
+        "gnss_frontend": {"recommendation": frontend_text, "chosen_part": frontend_part["ManufacturerProductNumber"] if frontend_part else None},
+        "tcxo_clock": {"recommendation": tcxo_text, "chosen_part": tcxo_part["ManufacturerProductNumber"] if tcxo_part else None},
+        "fpga_processor": {"recommendation": fpga_text, "chosen_part": fpga_part["ManufacturerProductNumber"] if fpga_part else None},
+        "power_regulator": {"recommendation": power_reg_text, "chosen_part": power_reg_part["ManufacturerProductNumber"] if power_reg_part else None},
+    }
+
+    parts_map = {
+        "Antenna Array": None, "LNA": lna_part, "Bandpass Filter": filter_part,
+        "GNSS Front-End Receiver": frontend_part, "TCXO Reference Clock": tcxo_part,
+        "Digital Beamforming Processor (FPGA)": fpga_part, "Power Regulator (LDO)": power_reg_part,
+    }
+    architecture = []
+    for stage_name in SYSTEM_ARCHITECTURE_TEMPLATE:
+        part = parts_map[stage_name]
+        if stage_name == "Antenna Array":
+            architecture.append({"stage": stage_name, "verified": True, "note": "Dimensions calculated via Balanis formula"})
+        else:
+            architecture.append({
+                "stage": stage_name,
+                "verified": bool(part),
+                "note": part["ManufacturerProductNumber"] if part else "No candidate confirmed",
+            })
 
     return {
         "1_antenna_dimensions": {
-            "n_elements": array["n_elements"],
-            "topology": f"1 center + {array['n_elements']-1} ring",
+            "n_elements": n,
+            "topology": f"1 center + {n-1} ring",
             "patch_width_mm": array["patch_width_mm"],
             "patch_length_mm": array["patch_length_mm"],
             "ring_radius_mm": array["ring_radius_mm"],
-            "reason": (
-                f"N-1 rule: {num_jammers} jammers require at least {array['n_elements']} elements. "
-                f"Patch size calculated via the standard Balanis microstrip formula at "
-                f"{freq_plan['center_freq_mhz']} MHz on a substrate with dielectric constant {dielectric_constant}."
-            ),
+            "reason": f"N-1 rule: {num_jammers} jammers require at least {n} elements. Patch size via Balanis formula at {freq_plan['center_freq_mhz']} MHz, dielectric constant {dielectric_constant}.",
         },
-        "2_powering": power if power else {"known": False, "note": "No chip was recommended, cannot calculate power."},
-        "3_frequencies": {
-            **freq_plan,
-            "reason": f"Band chosen to cover the required GNSS constellations within {fmin}-{fmax} MHz.",
-        },
-        "4_chips_and_components": {
-            "recommendation": recommendation_text,
-            "chosen_part": chosen_part["ManufacturerProductNumber"] if chosen_part else None,
-        },
-        "system_architecture": SYSTEM_ARCHITECTURE,
+        "2_powering": power if power else {"known": False, "note": "No LNA recommended, cannot calculate power."},
+        "3_frequencies": {**freq_plan, "reason": f"Band chosen to cover required GNSS constellations within {fmin}-{fmax} MHz."},
+        "4_chips_and_components": components,
+        "system_architecture": architecture,
     }
 
 
 # =========================================================
-# MAIN
+# PRINTING / MAIN
 # =========================================================
+
+def print_full_solution(result):
+    print("\n" + "="*70)
+    print("COMPLETE SYSTEM SOLUTION")
+    print("="*70)
+
+    d = result["1_antenna_dimensions"]
+    print(f"\n1. ANTENNA DIMENSIONS")
+    print(f"   {d['n_elements']} elements ({d['topology']}), patch {d['patch_width_mm']}x{d['patch_length_mm']}mm")
+    print(f"   Why: {d['reason']}")
+
+    p = result["2_powering"]
+    print(f"\n2. POWERING")
+    if p.get("known"):
+        print(f"   Estimated total system power: {p['estimated_total_system_power_w']}W")
+    else:
+        print(f"   {p.get('note')}")
+
+    f = result["3_frequencies"]
+    print(f"\n3. FREQUENCIES: {f['band_low_mhz']}-{f['band_high_mhz']} MHz (center {f['center_freq_mhz']} MHz)")
+
+    print(f"\n4. CHIPS AND COMPONENTS")
+    for name, info in result["4_chips_and_components"].items():
+        print(f"\n   [{name.upper()}] -> {info['chosen_part']}")
+
+    print(f"\nSYSTEM ARCHITECTURE:")
+    for stage in result["system_architecture"]:
+        tag = "[VERIFIED]" if stage["verified"] else "[NOT CONFIRMED]"
+        print(f"   {tag} {stage['stage']}: {stage['note']}")
+
+
 def main():
     print("Getting DigiKey access token...")
     token = get_token()
 
-    requirement = (
-        "I need a SAW bandpass filter for a GNSS front-end covering GPS L1, GLONASS, and BeiDou "
-        "around 1559-1610 MHz, to reject out-of-band interference before the LNA/receiver stage. "
-        "Needs to be currently purchasable, active status."
+    result = complete_solution(
+        token,
+        num_jammers=4,
+        band_mhz=(1559, 1610),
+        diameter_mm=125,
+        dielectric_constant=9.8,
+        substrate_height_mm=3.175,
     )
 
-    recommendation_text, chosen_part = find_and_recommend(
-        token,
-        search_term="SAW filter GNSS",
-        requirement=requirement,
-        required_child_categories={"SAW Filters"},
-        show_dropped=True,
-    )
+    print_full_solution(result)
+
 
 if __name__ == "__main__":
     main()
