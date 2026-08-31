@@ -6,49 +6,72 @@ import requests
 from google import genai
 from pypdf import PdfReader
 
-# =========================================================
-# AUTHENTICATION
-# =========================================================
+import time
 
-def get_token():
-    """Get a temporary access token from DigiKey using client credentials."""
-    response = requests.post(
-        "https://api.digikey.com/v1/oauth2/token",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        data={
-            "client_id": os.environ.get("DIGIKEY_CLIENT_ID"),
-            "client_secret": os.environ.get("DIGIKEY_CLIENT_SECRET"),
-            "grant_type": "client_credentials",
-        },
-    )
-    data = response.json()
-    if "access_token" not in data:
-        print("Failed to get token. Full response:")
-        print(data)
-        exit(1)
-    print("Got a token successfully.")
-    return data["access_token"]
+def get_token(max_retries=3, retry_delay=5):
+    """Get a temporary access token from DigiKey using client credentials.
+    Retries automatically on connection timeouts, since DigiKey's API has
+    shown intermittent connectivity issues during development."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(
+                "https://api.digikey.com/v1/oauth2/token",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "client_id": os.environ.get("DIGIKEY_CLIENT_ID"),
+                    "client_secret": os.environ.get("DIGIKEY_CLIENT_SECRET"),
+                    "grant_type": "client_credentials",
+                },
+                timeout=15,
+            )
+            data = response.json()
+            if "access_token" not in data:
+                print("Failed to get token. Full response:")
+                print(data)
+                exit(1)
+            print("Got a token successfully.")
+            return data["access_token"]
+        except requests.exceptions.ConnectionError as e:
+            print(f"Connection attempt {attempt}/{max_retries} failed: {e}")
+            if attempt < max_retries:
+                print(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                print("All retry attempts failed. Check your internet connection.")
+                raise
 
 
 # =========================================================
 # SEARCH
 # =========================================================
 
-def search_part(token, keywords, limit=50):
-    """Search DigiKey by free-text keywords. Max useful limit is around 50."""
-    response = requests.post(
-        "https://api.digikey.com/products/v4/search/keyword",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-            "X-DIGIKEY-Client-Id": os.environ.get("DIGIKEY_CLIENT_ID"),
-            "X-DIGIKEY-Locale-Site": "US",
-            "X-DIGIKEY-Locale-Language": "en",
-            "X-DIGIKEY-Locale-Currency": "USD",
-        },
-        json={"Keywords": keywords, "Limit": limit},
-    )
-    return response.json()
+def search_part(token, keywords, limit=50, max_retries=3, retry_delay=5):
+    """Search DigiKey by free-text keywords. Max useful limit is around 50.
+    Retries automatically on connection timeouts."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(
+                "https://api.digikey.com/products/v4/search/keyword",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {token}",
+                    "X-DIGIKEY-Client-Id": os.environ.get("DIGIKEY_CLIENT_ID"),
+                    "X-DIGIKEY-Locale-Site": "US",
+                    "X-DIGIKEY-Locale-Language": "en",
+                    "X-DIGIKEY-Locale-Currency": "USD",
+                },
+                json={"Keywords": keywords, "Limit": limit},
+                timeout=15,
+            )
+            return response.json()
+        except requests.exceptions.ConnectionError as e:
+            print(f"Search connection attempt {attempt}/{max_retries} failed: {e}")
+            if attempt < max_retries:
+                print(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                print("All retry attempts failed for this search.")
+                raise
 
 
 # =========================================================
@@ -509,16 +532,16 @@ def main():
     token = get_token()
 
     requirement = (
-        "I need a low-noise linear voltage regulator (LDO) providing a clean 3.3V rail "
-        "for RF components (an LNA and a GNSS receiver IC), low output noise is important "
-        "since this feeds sensitive RF circuitry. Needs to be currently purchasable, active status."
+        "I need a SAW bandpass filter for a GNSS front-end covering GPS L1, GLONASS, and BeiDou "
+        "around 1559-1610 MHz, to reject out-of-band interference before the LNA/receiver stage. "
+        "Needs to be currently purchasable, active status."
     )
 
     recommendation_text, chosen_part = find_and_recommend(
         token,
-        search_term="LDO regulator 3.3V low noise",
+        search_term="SAW filter GNSS",
         requirement=requirement,
-        required_child_categories={"Power Management (PMIC)"},
+        required_child_categories={"SAW Filters"},
         show_dropped=True,
     )
 
